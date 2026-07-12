@@ -359,14 +359,22 @@ impl AbstractDevice for Device {
         unsafe {
             let req = self.request();
             if let Err(err) = siocdifaddr(self.ctl.as_raw_fd(), &req) {
-                return Err(std::io::Error::from(err).into());
+                // On a freshly created device that has never had an address, there is nothing
+                // to delete and the kernel correctly returns EADDRNOTAVAIL -- not a real error.
+                if err != nix::errno::Errno::EADDRNOTAVAIL {
+                    return Err(std::io::Error::from(err).into());
+                }
             }
-            let previous = self.route.as_ref().ok_or(Error::InvalidConfig)?;
-            self.set_alias(
-                value,
-                IpAddr::V4(previous.dest),
-                IpAddr::V4(previous.netmask),
-            )?;
+            // If an alias was already set (self.route is populated), reuse its destination and
+            // netmask. Otherwise this is the first-ever address on this device: default to a
+            // /32 (host) route with the destination equal to the address itself, matching the
+            // point-to-point convention WireGuard tunnel interfaces use on other platforms
+            // (there is no broadcast/subnet on a TUN device with a single peer).
+            let (dest, mask) = match self.route.as_ref() {
+                Some(previous) => (IpAddr::V4(previous.dest), IpAddr::V4(previous.netmask)),
+                None => (value, IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))),
+            };
+            self.set_alias(value, dest, mask)?;
         }
         Ok(())
     }
